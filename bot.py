@@ -30,7 +30,7 @@ matches_data = set() # {(small_id, big_id)}
 
 main_menu = ReplyKeyboardMarkup(
     [
-        ["👤 Profil", "🌐 Profillar"],
+        ["👤 Profil", "🚀 Boshlash"],
     ],
     resize_keyboard=True
 )
@@ -45,7 +45,7 @@ profile_menu = ReplyKeyboardMarkup(
 
 browse_menu = ReplyKeyboardMarkup(
     [
-        ["❤️ Like", "⏭ Skip"],
+        ["❤️ Like", "➡️ Keyingisi"],
         ["⬅️ Qaytish"],
     ],
     resize_keyboard=True
@@ -258,7 +258,7 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
 
-        users_data[user_id]["city"] = f"Lokatsiya: {lat}, {lon}"
+        users_data[user_id]["city"] = "Lokatsiya yuborildi"
         users_data[user_id]["location"] = (lat, lon)
 
     else:
@@ -393,6 +393,38 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update)
 
 
+def find_next_candidate(user_id: int):
+    viewed = viewed_data.setdefault(user_id, set())
+
+    candidates = []
+    for other_id in users_data.keys():
+        if other_id == user_id:
+            continue
+        if not is_profile_complete(other_id):
+            continue
+        if not fits_preference(user_id, other_id):
+            continue
+
+        other_pref = users_data[other_id].get("looking_for")
+        your_gender = users_data[user_id].get("gender")
+        if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
+            continue
+
+        candidates.append(other_id)
+
+    if not candidates:
+        return None
+
+    # avval ko‘rilmaganlarni qidiramiz
+    for candidate_id in candidates:
+        if candidate_id not in viewed:
+            return candidate_id
+
+    # hammasi ko‘rilgan bo‘lsa, qaytadan aylantiramiz
+    viewed.clear()
+    return candidates[0] if candidates else None
+
+
 async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -403,34 +435,14 @@ async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    viewed = viewed_data.setdefault(user_id, set())
     likes_data.setdefault(user_id, set())
+    viewed_data.setdefault(user_id, set())
 
-    current_user_gender_pref = users_data[user_id].get("looking_for")
-
-    candidate_id = None
-    for other_id in users_data.keys():
-        if other_id == user_id:
-            continue
-        if not is_profile_complete(other_id):
-            continue
-        if other_id in viewed:
-            continue
-        if not fits_preference(user_id, other_id):
-            continue
-
-        # agar xohlasangiz, nomzodning ham sizga mosligini tekshirish uchun
-        other_pref = users_data[other_id].get("looking_for")
-        your_gender = users_data[user_id].get("gender")
-        if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
-            continue
-
-        candidate_id = other_id
-        break
+    candidate_id = find_next_candidate(user_id)
 
     if candidate_id is None:
         await update.message.reply_text(
-            "Hozircha yangi profillar yo‘q 🙂",
+            "Hozircha profillar yo‘q 🙂",
             reply_markup=main_menu
         )
         return
@@ -464,7 +476,7 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not target_id:
         await update.message.reply_text(
-            "Avval profil oching.",
+            "Avval 🚀 Boshlash ni bosing.",
             reply_markup=main_menu
         )
         return
@@ -472,31 +484,29 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     likes_data.setdefault(user_id, set()).add(target_id)
     viewed_data.setdefault(user_id, set()).add(target_id)
 
-    # o‘zaro like bo‘lsa match
+    matched_now = False
+
     if user_id in likes_data.get(target_id, set()):
         pair = get_match_pair(user_id, target_id)
 
         if pair not in matches_data:
             matches_data.add(pair)
+            matched_now = True
 
             target_profile = users_data.get(target_id, {})
             user_profile = users_data.get(user_id, {})
 
-            try:
-                await update.message.reply_text(
-                    f"🎉 Sizda match bo‘ldi!\n\n"
-                    f"👤 {target_profile.get('name', 'Foydalanuvchi')}",
-                    reply_markup=main_menu
-                )
-            except Exception:
-                pass
+            await update.message.reply_text(
+                f"🎉 Match bo‘ldi!\n\n"
+                f"👤 {target_profile.get('name', 'Foydalanuvchi')} ham sizni like qildi."
+            )
 
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
                     text=(
-                        f"🎉 Sizda match bo‘ldi!\n\n"
-                        f"👤 {user_profile.get('name', 'Foydalanuvchi')}"
+                        f"🎉 Match bo‘ldi!\n\n"
+                        f"👤 {user_profile.get('name', 'Foydalanuvchi')} sizni like qildi."
                     ),
                 )
             except Exception as e:
@@ -513,22 +523,21 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 print(f"Matchni kanalga yuborishda xatolik: {e}")
-        else:
-            await update.message.reply_text("Bu profilga like bosildi ✅", reply_markup=main_menu)
-    else:
-        await update.message.reply_text("Like yuborildi ❤️", reply_markup=main_menu)
+
+    if not matched_now:
+        await update.message.reply_text("Like yuborildi ❤️")
 
     context.user_data.pop("current_profile_id", None)
     await show_next_profile(update, context)
 
 
-async def skip_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     target_id = context.user_data.get("current_profile_id")
 
     if not target_id:
         await update.message.reply_text(
-            "Avval profil oching.",
+            "Avval 🚀 Boshlash ni bosing.",
             reply_markup=main_menu
         )
         return
@@ -578,9 +587,9 @@ def main():
 
     app.add_handler(MessageHandler(filters.Regex("^👤 Profil$"), show_profile))
     app.add_handler(MessageHandler(filters.Regex("^⬅️ Qaytish$"), back_to_main))
-    app.add_handler(MessageHandler(filters.Regex("^🌐 Profillar$"), browse_profiles))
+    app.add_handler(MessageHandler(filters.Regex("^🚀 Boshlash$"), browse_profiles))
     app.add_handler(MessageHandler(filters.Regex("^❤️ Like$"), like_profile))
-    app.add_handler(MessageHandler(filters.Regex("^⏭ Skip$"), skip_profile))
+    app.add_handler(MessageHandler(filters.Regex("^➡️ Keyingisi$"), next_profile))
 
     print("Bot ishladi")
     app.run_polling()
