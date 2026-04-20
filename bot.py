@@ -1,7 +1,6 @@
 import os
 from datetime import datetime
 
-from geopy.geocoders import Nominatim
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -25,10 +24,14 @@ PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 users_data = {}
 started_users = set()
 
-geolocator = Nominatim(user_agent="friend_match_uz_bot")
+likes_data = {}      # {user_id: set(target_user_ids)}
+viewed_data = {}     # {user_id: set(viewed_user_ids)}
+matches_data = set() # {(small_id, big_id)}
 
 main_menu = ReplyKeyboardMarkup(
-    [["👤 Profil"]],
+    [
+        ["👤 Profil", "🌐 Profillar"],
+    ],
     resize_keyboard=True
 )
 
@@ -39,6 +42,44 @@ profile_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+browse_menu = ReplyKeyboardMarkup(
+    [
+        ["❤️ Like", "⏭ Skip"],
+        ["⬅️ Qaytish"],
+    ],
+    resize_keyboard=True
+)
+
+
+def is_profile_complete(user_id: int) -> bool:
+    profile = users_data.get(user_id, {})
+    required = ["phone", "name", "age", "gender", "looking_for", "city", "bio", "photo"]
+    return all(k in profile for k in required)
+
+
+def get_match_pair(user1: int, user2: int):
+    return tuple(sorted((user1, user2)))
+
+
+def fits_preference(viewer_id: int, candidate_id: int) -> bool:
+    viewer = users_data.get(viewer_id, {})
+    candidate = users_data.get(candidate_id, {})
+
+    if not viewer or not candidate:
+        return False
+
+    viewer_pref = viewer.get("looking_for")
+    candidate_gender = candidate.get("gender")
+
+    if viewer_pref == "🔄 Farqi yo‘q":
+        return True
+
+    return viewer_pref == candidate_gender
+
+
+async def send_main_menu(update: Update):
+    await update.message.reply_text("Asosiy menyu", reply_markup=main_menu)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -217,27 +258,7 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
 
-        try:
-            location = geolocator.reverse((lat, lon), language="en", exactly_one=True)
-
-            if location and "address" in location.raw:
-                address = location.raw["address"]
-                city = (
-                    address.get("city")
-                    or address.get("town")
-                    or address.get("village")
-                    or address.get("county")
-                    or address.get("state")
-                    or "Noma’lum"
-                )
-            else:
-                city = "Noma’lum"
-
-        except Exception as e:
-            print(f"Lokatsiyadan shahar aniqlashda xatolik: {e}")
-            city = "Noma’lum"
-
-        users_data[user_id]["city"] = city
+        users_data[user_id]["city"] = f"Lokatsiya: {lat}, {lon}"
         users_data[user_id]["location"] = (lat, lon)
 
     else:
@@ -341,9 +362,9 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if user_id not in users_data:
+    if user_id not in users_data or not is_profile_complete(user_id):
         await update.message.reply_text(
-            "Sizda hali profil yo‘q. /start bosing.",
+            "Sizda hali to‘liq profil yo‘q. /start bosing.",
             reply_markup=main_menu
         )
         return
@@ -361,30 +382,167 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 Bio: {profile.get('bio', 'yo‘q')}"
     )
 
-    if "photo" in profile:
-        await update.message.reply_photo(
-            photo=profile["photo"],
-            caption=text,
-            reply_markup=profile_menu
-        )
-    else:
-        await update.message.reply_text(
-            text,
-            reply_markup=profile_menu
-        )
+    await update.message.reply_photo(
+        photo=profile["photo"],
+        caption=text,
+        reply_markup=profile_menu
+    )
 
 
 async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Asosiy menyu",
-        reply_markup=main_menu
+    await send_main_menu(update)
+
+
+async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in users_data or not is_profile_complete(user_id):
+        await update.message.reply_text(
+            "Avval profilingizni to‘liq yarating. /start bosing.",
+            reply_markup=main_menu
+        )
+        return
+
+    viewed = viewed_data.setdefault(user_id, set())
+    likes_data.setdefault(user_id, set())
+
+    current_user_gender_pref = users_data[user_id].get("looking_for")
+
+    candidate_id = None
+    for other_id in users_data.keys():
+        if other_id == user_id:
+            continue
+        if not is_profile_complete(other_id):
+            continue
+        if other_id in viewed:
+            continue
+        if not fits_preference(user_id, other_id):
+            continue
+
+        # agar xohlasangiz, nomzodning ham sizga mosligini tekshirish uchun
+        other_pref = users_data[other_id].get("looking_for")
+        your_gender = users_data[user_id].get("gender")
+        if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
+            continue
+
+        candidate_id = other_id
+        break
+
+    if candidate_id is None:
+        await update.message.reply_text(
+            "Hozircha yangi profillar yo‘q 🙂",
+            reply_markup=main_menu
+        )
+        return
+
+    context.user_data["current_profile_id"] = candidate_id
+
+    profile = users_data[candidate_id]
+    text = (
+        "🌐 Profil\n\n"
+        f"👤 Ism: {profile.get('name', 'yo‘q')}\n"
+        f"🎂 Yosh: {profile.get('age', 'yo‘q')}\n"
+        f"🚻 Jins: {profile.get('gender', 'yo‘q')}\n"
+        f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
+        f"📝 Bio: {profile.get('bio', 'yo‘q')}"
     )
+
+    await update.message.reply_photo(
+        photo=profile["photo"],
+        caption=text,
+        reply_markup=browse_menu
+    )
+
+
+async def browse_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_next_profile(update, context)
+
+
+async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    target_id = context.user_data.get("current_profile_id")
+
+    if not target_id:
+        await update.message.reply_text(
+            "Avval profil oching.",
+            reply_markup=main_menu
+        )
+        return
+
+    likes_data.setdefault(user_id, set()).add(target_id)
+    viewed_data.setdefault(user_id, set()).add(target_id)
+
+    # o‘zaro like bo‘lsa match
+    if user_id in likes_data.get(target_id, set()):
+        pair = get_match_pair(user_id, target_id)
+
+        if pair not in matches_data:
+            matches_data.add(pair)
+
+            target_profile = users_data.get(target_id, {})
+            user_profile = users_data.get(user_id, {})
+
+            try:
+                await update.message.reply_text(
+                    f"🎉 Sizda match bo‘ldi!\n\n"
+                    f"👤 {target_profile.get('name', 'Foydalanuvchi')}",
+                    reply_markup=main_menu
+                )
+            except Exception:
+                pass
+
+            try:
+                await context.bot.send_message(
+                    chat_id=target_id,
+                    text=(
+                        f"🎉 Sizda match bo‘ldi!\n\n"
+                        f"👤 {user_profile.get('name', 'Foydalanuvchi')}"
+                    ),
+                )
+            except Exception as e:
+                print(f"Match xabarini yuborishda xatolik: {e}")
+
+            try:
+                await context.bot.send_message(
+                    chat_id=CHANNEL_ID,
+                    text=(
+                        "💖 Yangi match!\n\n"
+                        f"{user_profile.get('name', 'User')} ❤️ "
+                        f"{target_profile.get('name', 'User')}"
+                    )
+                )
+            except Exception as e:
+                print(f"Matchni kanalga yuborishda xatolik: {e}")
+        else:
+            await update.message.reply_text("Bu profilga like bosildi ✅", reply_markup=main_menu)
+    else:
+        await update.message.reply_text("Like yuborildi ❤️", reply_markup=main_menu)
+
+    context.user_data.pop("current_profile_id", None)
+    await show_next_profile(update, context)
+
+
+async def skip_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    target_id = context.user_data.get("current_profile_id")
+
+    if not target_id:
+        await update.message.reply_text(
+            "Avval profil oching.",
+            reply_markup=main_menu
+        )
+        return
+
+    viewed_data.setdefault(user_id, set()).add(target_id)
+    context.user_data.pop("current_profile_id", None)
+
+    await show_next_profile(update, context)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Bekor qilindi.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=main_menu,
     )
     return ConversationHandler.END
 
@@ -417,8 +575,12 @@ def main():
     )
 
     app.add_handler(conv_handler)
+
     app.add_handler(MessageHandler(filters.Regex("^👤 Profil$"), show_profile))
     app.add_handler(MessageHandler(filters.Regex("^⬅️ Qaytish$"), back_to_main))
+    app.add_handler(MessageHandler(filters.Regex("^🌐 Profillar$"), browse_profiles))
+    app.add_handler(MessageHandler(filters.Regex("^❤️ Like$"), like_profile))
+    app.add_handler(MessageHandler(filters.Regex("^⏭ Skip$"), skip_profile))
 
     print("Bot ishladi")
     app.run_polling()
