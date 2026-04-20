@@ -1,7 +1,9 @@
 import os
 from datetime import datetime
-from geopy.geocoders import Nominatim
+from typing import Optional, Tuple, List
 
+import psycopg
+from geopy.geocoders import Nominatim
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -18,20 +20,13 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv("TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = -1003937370541
 
 PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 
-users_data = {}
-started_users = set()
-likes_data = {}          # {user_id: set(target_ids)}
-viewed_data = {}         # {user_id: set(viewed_ids)}
-matches_data = set()     # {(small_id, big_id)}
-pending_like_views = {}  # {user_id: liked_by_user_id}
-
 geolocator = Nominatim(user_agent="friend_match_uz_bot")
 
-# Qisqartirishlar
 state_map = {
     "Illinois": "IL",
     "California": "CA",
@@ -97,19 +92,195 @@ browse_menu = ReplyKeyboardMarkup(
 )
 
 
+def get_conn():
+    return psycopg.connect(DATABASE_URL)
+
+
+def init_db():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    telegram_id BIGINT PRIMARY KEY,
+                    telegram_username TEXT,
+                    phone TEXT,
+                    name TEXT,
+                    age INT,
+                    gender TEXT,
+                    looking_for TEXT,
+                    city TEXT,
+                    bio TEXT,
+                    photo TEXT,
+                    lat DOUBLE PRECISION,
+                    lon DOUBLE PRECISION,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS likes (
+                    from_user BIGINT,
+                    to_user BIGINT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (from_user, to_user)
+                )
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS matches (
+                    user1 BIGINT,
+                    user2 BIGINT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (user1, user2)
+                )
+            """)
+
+
+def save_user(profile: dict):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO users (
+                    telegram_id, telegram_username, phone, name, age,
+                    gender, looking_for, city, bio, photo, lat, lon
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (telegram_id)
+                DO UPDATE SET
+                    telegram_username = EXCLUDED.telegram_username,
+                    phone = EXCLUDED.phone,
+                    name = EXCLUDED.name,
+                    age = EXCLUDED.age,
+                    gender = EXCLUDED.gender,
+                    looking_for = EXCLUDED.looking_for,
+                    city = EXCLUDED.city,
+                    bio = EXCLUDED.bio,
+                    photo = EXCLUDED.photo,
+                    lat = EXCLUDED.lat,
+                    lon = EXCLUDED.lon
+            """, (
+                profile["telegram_id"],
+                profile.get("telegram_username"),
+                profile.get("phone"),
+                profile.get("name"),
+                profile.get("age"),
+                profile.get("gender"),
+                profile.get("looking_for"),
+                profile.get("city"),
+                profile.get("bio"),
+                profile.get("photo"),
+                profile.get("lat"),
+                profile.get("lon"),
+            ))
+
+
+def get_user(user_id: int) -> Optional[dict]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT telegram_id, telegram_username, phone, name, age,
+                       gender, looking_for, city, bio, photo, lat, lon
+                FROM users
+                WHERE telegram_id = %s
+            """, (user_id,))
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "telegram_id": row[0],
+        "telegram_username": row[1],
+        "phone": row[2],
+        "name": row[3],
+        "age": row[4],
+        "gender": row[5],
+        "looking_for": row[6],
+        "city": row[7],
+        "bio": row[8],
+        "photo": row[9],
+        "lat": row[10],
+        "lon": row[11],
+    }
+
+
 def is_profile_complete(user_id: int) -> bool:
-    profile = users_data.get(user_id, {})
+    profile = get_user(user_id)
+    if not profile:
+        return False
+
     required = ["phone", "name", "age", "gender", "looking_for", "city", "bio", "photo"]
-    return all(k in profile for k in required)
+    return all(profile.get(k) not in (None, "") for k in required)
 
 
-def get_match_pair(user1: int, user2: int):
-    return tuple(sorted((user1, user2)))
+def save_like(from_user: int, to_user: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO likes (from_user, to_user)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+            """, (from_user, to_user))
+
+
+def has_like(from_user: int, to_user: int) -> bool:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1
+                FROM likes
+                WHERE from_user = %s AND to_user = %s
+                LIMIT 1
+            """, (from_user, to_user))
+            return cur.fetchone() is not None
+
+
+def save_match(user1: int, user2: int):
+    a, b = sorted((user1, user2))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO matches (user1, user2)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+            """, (a, b))
+
+
+def match_exists(user1: int, user2: int) -> bool:
+    a, b = sorted((user1, user2))
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 1
+                FROM matches
+                WHERE user1 = %s AND user2 = %s
+                LIMIT 1
+            """, (a, b))
+            return cur.fetchone() is not None
+
+
+def get_all_candidate_ids() -> List[int]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT telegram_id
+                FROM users
+                WHERE phone IS NOT NULL
+                  AND name IS NOT NULL
+                  AND age IS NOT NULL
+                  AND gender IS NOT NULL
+                  AND looking_for IS NOT NULL
+                  AND city IS NOT NULL
+                  AND bio IS NOT NULL
+                  AND photo IS NOT NULL
+                ORDER BY created_at DESC
+            """)
+            return [row[0] for row in cur.fetchall()]
 
 
 def fits_preference(viewer_id: int, candidate_id: int) -> bool:
-    viewer = users_data.get(viewer_id, {})
-    candidate = users_data.get(candidate_id, {})
+    viewer = get_user(viewer_id)
+    candidate = get_user(candidate_id)
 
     if not viewer or not candidate:
         return False
@@ -152,8 +323,8 @@ async def send_profile_to_user(
     context: ContextTypes.DEFAULT_TYPE,
     title: str = "🌐 Profil",
 ):
-    profile = users_data.get(candidate_id)
-    if not profile or "photo" not in profile:
+    profile = get_user(candidate_id)
+    if not profile or not profile.get("photo"):
         return
 
     caption = build_profile_caption(profile, title)
@@ -168,6 +339,38 @@ async def send_profile_to_user(
 
 async def send_main_menu(update: Update):
     await update.message.reply_text("Asosiy menyu", reply_markup=main_menu)
+
+
+def build_short_location(lat: float, lon: float) -> str:
+    try:
+        location = geolocator.reverse((lat, lon), language="en", exactly_one=True)
+
+        if location and "address" in location.raw:
+            address = location.raw["address"]
+
+            city = (
+                address.get("city")
+                or address.get("town")
+                or address.get("village")
+                or address.get("county")
+                or ""
+            )
+
+            state = address.get("state", "") or address.get("region", "")
+            country = address.get("country", "")
+
+            state = state_map.get(state, state)
+            country = country_map.get(country, country)
+
+            full_location = ", ".join(
+                part for part in [city, state, country] if part
+            )
+            return full_location or "Noma’lum"
+
+        return "Noma’lum"
+    except Exception as e:
+        print(f"Lokatsiyadan shahar aniqlashda xatolik: {e}")
+        return "Noma’lum"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -234,11 +437,12 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     user_id = update.effective_user.id
 
-    users_data[user_id] = {
+    context.user_data["profile"] = {
         "telegram_id": user_id,
         "telegram_username": update.effective_user.username,
         "phone": contact.phone_number,
-        "location": None,
+        "lat": None,
+        "lon": None,
     }
 
     await update.message.reply_text(
@@ -249,20 +453,20 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
     name = update.message.text.strip()
 
     if len(name) < 2:
         await update.message.reply_text("Ismingizni to‘g‘ri kiriting.")
         return NAME
 
-    users_data[user_id]["name"] = name
+    profile["name"] = name
     await update.message.reply_text("Yoshingiz?")
     return AGE
 
 
 async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
     age_text = update.message.text.strip()
 
     if not age_text.isdigit():
@@ -275,7 +479,7 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("18 dan 100 gacha yosh kiriting.")
         return AGE
 
-    users_data[user_id]["age"] = age
+    profile["age"] = age
 
     keyboard = ReplyKeyboardMarkup(
         [["👨 Erkak", "👩 Ayol"]],
@@ -288,14 +492,14 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
     text = update.message.text.strip()
 
     if text not in ["👨 Erkak", "👩 Ayol"]:
         await update.message.reply_text("Tugmalardan birini tanlang.")
         return GENDER
 
-    users_data[user_id]["gender"] = text
+    profile["gender"] = text
 
     keyboard = ReplyKeyboardMarkup(
         [["👨 Erkak", "👩 Ayol"], ["🔄 Farqi yo‘q"]],
@@ -308,14 +512,14 @@ async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def get_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
     text = update.message.text.strip()
 
     if text not in ["👨 Erkak", "👩 Ayol", "🔄 Farqi yo‘q"]:
         await update.message.reply_text("Tugmalardan birini tanlang.")
         return LOOKING_FOR
 
-    users_data[user_id]["looking_for"] = text
+    profile["looking_for"] = text
 
     location_keyboard = ReplyKeyboardMarkup(
         [
@@ -334,46 +538,15 @@ async def get_looking_for(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
 
     if update.message.location:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
 
-        try:
-            location = geolocator.reverse((lat, lon), language="en", exactly_one=True)
-
-            if location and "address" in location.raw:
-                address = location.raw["address"]
-
-                city = (
-                    address.get("city")
-                    or address.get("town")
-                    or address.get("village")
-                    or address.get("county")
-                    or ""
-                )
-
-                state = address.get("state", "") or address.get("region", "")
-                country = address.get("country", "")
-
-                state = state_map.get(state, state)
-                country = country_map.get(country, country)
-
-                full_location = ", ".join(
-                    part for part in [city, state, country] if part
-                )
-                if not full_location:
-                    full_location = "Noma’lum"
-            else:
-                full_location = "Noma’lum"
-
-        except Exception as e:
-            print(f"Lokatsiyadan shahar aniqlashda xatolik: {e}")
-            full_location = "Noma’lum"
-
-        users_data[user_id]["city"] = full_location
-        users_data[user_id]["location"] = (lat, lon)
+        profile["lat"] = lat
+        profile["lon"] = lon
+        profile["city"] = build_short_location(lat, lon)
 
     else:
         text = update.message.text.strip()
@@ -389,8 +562,9 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             await update.message.reply_text("Shahar nomini to‘g‘ri kiriting.")
             return CITY
 
-        users_data[user_id]["city"] = text
-        users_data[user_id]["location"] = None
+        profile["city"] = text
+        profile["lat"] = None
+        profile["lon"] = None
 
     skip_keyboard = ReplyKeyboardMarkup(
         [["⏭ O‘tkazib yuborish"]],
@@ -403,13 +577,10 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def get_bio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
     text = update.message.text.strip()
 
-    if text == "⏭ O‘tkazib yuborish":
-        users_data[user_id]["bio"] = "yo‘q"
-    else:
-        users_data[user_id]["bio"] = text
+    profile["bio"] = "yo‘q" if text == "⏭ O‘tkazib yuborish" else text
 
     await update.message.reply_text(
         "Profil rasmingizni yuboring:",
@@ -419,16 +590,16 @@ async def get_bio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
+    profile = context.user_data["profile"]
 
     if not update.message.photo:
         await update.message.reply_text("Iltimos, rasm yuboring.")
         return PHOTO
 
     photo_id = update.message.photo[-1].file_id
-    users_data[user_id]["photo"] = photo_id
+    profile["photo"] = photo_id
 
-    profile = users_data[user_id]
+    save_user(profile)
 
     await update.message.reply_photo(
         photo=photo_id,
@@ -462,31 +633,31 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             caption=caption_text
         )
 
-        if profile.get("location"):
-            lat, lon = profile["location"]
+        if profile.get("lat") is not None and profile.get("lon") is not None:
             await context.bot.send_location(
                 chat_id=CHANNEL_ID,
-                latitude=lat,
-                longitude=lon
+                latitude=profile["lat"],
+                longitude=profile["lon"]
             )
 
     except Exception as e:
         print(f"Kanalga yuborishda xatolik: {e}")
 
+    context.user_data.pop("profile", None)
     return ConversationHandler.END
 
 
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if user_id not in users_data or not is_profile_complete(user_id):
+    if not is_profile_complete(user_id):
         await update.message.reply_text(
             "Sizda hali to‘liq profil yo‘q. /start bosing.",
             reply_markup=main_menu
         )
         return
 
-    profile = users_data[user_id]
+    profile = get_user(user_id)
 
     await update.message.reply_photo(
         photo=profile["photo"],
@@ -499,20 +670,19 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update)
 
 
-def find_next_candidate(user_id: int):
-    viewed = viewed_data.setdefault(user_id, set())
-
+def find_next_candidate(user_id: int, viewed_ids: set):
     candidates = []
-    for other_id in users_data.keys():
+    for other_id in get_all_candidate_ids():
         if other_id == user_id:
-            continue
-        if not is_profile_complete(other_id):
             continue
         if not fits_preference(user_id, other_id):
             continue
 
-        other_pref = users_data[other_id].get("looking_for")
-        your_gender = users_data[user_id].get("gender")
+        other_profile = get_user(other_id)
+        your_profile = get_user(user_id)
+
+        other_pref = other_profile.get("looking_for")
+        your_gender = your_profile.get("gender")
         if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
             continue
 
@@ -522,27 +692,27 @@ def find_next_candidate(user_id: int):
         return None
 
     for candidate_id in candidates:
-        if candidate_id not in viewed:
+        if candidate_id not in viewed_ids:
             return candidate_id
 
-    viewed.clear()
+    viewed_ids.clear()
     return candidates[0] if candidates else None
 
 
 async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if user_id not in users_data or not is_profile_complete(user_id):
+    if not is_profile_complete(user_id):
         await update.message.reply_text(
             "Avval profilingizni to‘liq yarating. /start bosing.",
             reply_markup=main_menu
         )
         return
 
-    likes_data.setdefault(user_id, set())
-    viewed_data.setdefault(user_id, set())
+    viewed_ids = set(context.user_data.get("viewed_ids", []))
+    candidate_id = find_next_candidate(user_id, viewed_ids)
 
-    candidate_id = find_next_candidate(user_id)
+    context.user_data["viewed_ids"] = list(viewed_ids)
 
     if candidate_id is None:
         await update.message.reply_text(
@@ -579,19 +749,21 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    likes_data.setdefault(user_id, set()).add(target_id)
-    viewed_data.setdefault(user_id, set()).add(target_id)
+    save_like(user_id, target_id)
 
-    my_profile = users_data.get(user_id, {})
-    target_profile = users_data.get(target_id, {})
+    viewed_ids = set(context.user_data.get("viewed_ids", []))
+    viewed_ids.add(target_id)
+    context.user_data["viewed_ids"] = list(viewed_ids)
+
+    my_profile = get_user(user_id)
+    target_profile = get_user(target_id)
 
     my_name = my_profile.get("name", "Foydalanuvchi")
     target_name = target_profile.get("name", "Foydalanuvchi")
 
     matched_now = False
 
-    # Agar target sizni hali like qilmagan bo‘lsa, unga sizning profilingiz yuboriladi
-    if user_id not in likes_data.get(target_id, set()):
+    if not has_like(target_id, user_id):
         try:
             pending_like_views[target_id] = user_id
 
@@ -614,12 +786,9 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"Like xabarini yuborishda xatolik: {e}")
 
-    # Agar target ham oldin like qilgan bo‘lsa -> MATCH
-    if user_id in likes_data.get(target_id, set()):
-        pair = get_match_pair(user_id, target_id)
-
-        if pair not in matches_data:
-            matches_data.add(pair)
+    if has_like(target_id, user_id):
+        if not match_exists(user_id, target_id):
+            save_match(user_id, target_id)
             matched_now = True
 
             your_contact = get_contact_text(my_profile)
@@ -678,7 +847,10 @@ async def next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    viewed_data.setdefault(user_id, set()).add(target_id)
+    viewed_ids = set(context.user_data.get("viewed_ids", []))
+    viewed_ids.add(target_id)
+    context.user_data["viewed_ids"] = list(viewed_ids)
+
     context.user_data.pop("current_profile_id", None)
 
     if pending_like_views.get(user_id) == target_id:
@@ -692,12 +864,17 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Bekor qilindi.",
         reply_markup=main_menu,
     )
+    context.user_data.pop("profile", None)
     return ConversationHandler.END
 
 
 def main():
     if not TOKEN:
         raise ValueError("TOKEN topilmadi. Railway Variables ga TOKEN qo‘shing.")
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL topilmadi.")
+
+    init_db()
 
     app = Application.builder().token(TOKEN).build()
 
