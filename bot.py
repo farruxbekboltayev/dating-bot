@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from geopy.geocoders import Nominatim
 
 from telegram import (
     Update,
@@ -23,31 +24,74 @@ PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 
 users_data = {}
 started_users = set()
+likes_data = {}       # {user_id: set(target_ids)}
+viewed_data = {}      # {user_id: set(viewed_ids)}
+matches_data = set()  # {(small_id, big_id)}
 
-likes_data = {}      # {user_id: set(target_user_ids)}
-viewed_data = {}     # {user_id: set(viewed_user_ids)}
-matches_data = set() # {(small_id, big_id)}
+geolocator = Nominatim(user_agent="friend_match_uz_bot")
+
+# Qisqartirishlar
+state_map = {
+    "Illinois": "IL",
+    "California": "CA",
+    "New York": "NY",
+    "Texas": "TX",
+    "Florida": "FL",
+    "Pennsylvania": "PA",
+    "Ohio": "OH",
+    "Michigan": "MI",
+    "New Jersey": "NJ",
+    "Virginia": "VA",
+    "Washington": "WA",
+    "Arizona": "AZ",
+    "Georgia": "GA",
+    "North Carolina": "NC",
+    "South Carolina": "SC",
+    "Massachusetts": "MA",
+    "Maryland": "MD",
+    "Missouri": "MO",
+    "Indiana": "IN",
+    "Colorado": "CO",
+    "Nevada": "NV",
+    "Utah": "UT",
+    "Oregon": "OR",
+    "Minnesota": "MN",
+    "Wisconsin": "WI",
+    "Toshkent": "Toshkent",
+    "Xorazm Region": "Xorazm",
+    "Samarqand Region": "Samarqand",
+    "Bukhara Region": "Buxoro",
+    "Andijan Region": "Andijon",
+    "Namangan Region": "Namangan",
+    "Fergana Region": "Farg‘ona",
+    "Kashkadarya Region": "Qashqadaryo",
+    "Surxondaryo Region": "Surxondaryo",
+    "Jizzakh Region": "Jizzax",
+    "Sirdaryo Region": "Sirdaryo",
+    "Navoiy Region": "Navoiy",
+    "Republic of Karakalpakstan": "Qoraqalpog‘iston",
+}
+
+country_map = {
+    "United States": "USA",
+    "Uzbekistan": "UZ",
+    "Russia": "RU",
+    "Kazakhstan": "KZ",
+    "Turkey": "TR",
+}
 
 main_menu = ReplyKeyboardMarkup(
-    [
-        ["👤 Profil", "🚀 Boshlash"],
-    ],
+    [["👤 Profil", "🚀 Boshlash"]],
     resize_keyboard=True
 )
 
 profile_menu = ReplyKeyboardMarkup(
-    [
-        ["✏️ Tahrirlash"],
-        ["⬅️ Qaytish"],
-    ],
+    [["✏️ Tahrirlash"], ["⬅️ Qaytish"]],
     resize_keyboard=True
 )
 
 browse_menu = ReplyKeyboardMarkup(
-    [
-        ["❤️ Like", "➡️ Keyingisi"],
-        ["⬅️ Qaytish"],
-    ],
+    [["❤️ Like", "➡️ Keyingisi"], ["⬅️ Qaytish"]],
     resize_keyboard=True
 )
 
@@ -76,6 +120,29 @@ def fits_preference(viewer_id: int, candidate_id: int) -> bool:
         return True
 
     return viewer_pref == candidate_gender
+
+
+def get_contact_text(profile: dict) -> str:
+    username = profile.get("telegram_username")
+    tg_id = profile.get("telegram_id")
+
+    if username:
+        return f"@{username}"
+    if tg_id:
+        return f"tg://user?id={tg_id}"
+    return "username yo‘q"
+
+
+def build_profile_caption(profile: dict, title: str = "👤 Profil") -> str:
+    return (
+        f"{title}\n\n"
+        f"👤 Ism: {profile.get('name', 'yo‘q')}\n"
+        f"🎂 Yosh: {profile.get('age', 'yo‘q')}\n"
+        f"🚻 Jins: {profile.get('gender', 'yo‘q')}\n"
+        f"🔎 Qidiryapti: {profile.get('looking_for', 'yo‘q')}\n"
+        f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
+        f"📝 Bio: {profile.get('bio', 'yo‘q')}"
+    )
 
 
 async def send_main_menu(update: Update):
@@ -113,8 +180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
 
     await update.message.reply_text(
-        "Assalomu alaykum.\n\n"
-        "Ro‘yxatdan o‘tish uchun telefon raqamingizni yuboring:",
+        "Assalomu alaykum.\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni yuboring:",
         reply_markup=phone_keyboard,
     )
     return PHONE
@@ -149,6 +215,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     users_data[user_id] = {
         "telegram_id": user_id,
+        "telegram_username": update.effective_user.username,
         "phone": contact.phone_number,
         "location": None,
     }
@@ -165,7 +232,7 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name = update.message.text.strip()
 
     if len(name) < 2:
-        await update.message.reply_text("Ismingizni to‘g‘ri kiriting:")
+        await update.message.reply_text("Ismingizni to‘g‘ri kiriting.")
         return NAME
 
     users_data[user_id]["name"] = name
@@ -195,10 +262,7 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         one_time_keyboard=True,
     )
 
-    await update.message.reply_text(
-        "Jinsingiz:",
-        reply_markup=keyboard,
-    )
+    await update.message.reply_text("Jinsingiz:", reply_markup=keyboard)
     return GENDER
 
 
@@ -218,10 +282,7 @@ async def get_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         one_time_keyboard=True,
     )
 
-    await update.message.reply_text(
-        "Kim bilan tanishmoqchisiz?",
-        reply_markup=keyboard,
-    )
+    await update.message.reply_text("Kim bilan tanishmoqchisiz?", reply_markup=keyboard)
     return LOOKING_FOR
 
 
@@ -258,7 +319,39 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
 
-        users_data[user_id]["city"] = "Lokatsiya yuborildi"
+        try:
+            location = geolocator.reverse((lat, lon), language="en", exactly_one=True)
+
+            if location and "address" in location.raw:
+                address = location.raw["address"]
+
+                city = (
+                    address.get("city")
+                    or address.get("town")
+                    or address.get("village")
+                    or address.get("county")
+                    or ""
+                )
+
+                state = address.get("state", "") or address.get("region", "")
+                country = address.get("country", "")
+
+                state = state_map.get(state, state)
+                country = country_map.get(country, country)
+
+                full_location = ", ".join(
+                    part for part in [city, state, country] if part
+                )
+                if not full_location:
+                    full_location = "Noma’lum"
+            else:
+                full_location = "Noma’lum"
+
+        except Exception as e:
+            print(f"Lokatsiyadan shahar aniqlashda xatolik: {e}")
+            full_location = "Noma’lum"
+
+        users_data[user_id]["city"] = full_location
         users_data[user_id]["location"] = (lat, lon)
 
     else:
@@ -284,10 +377,7 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         one_time_keyboard=True,
     )
 
-    await update.message.reply_text(
-        "O‘zingiz haqingizda yozing:",
-        reply_markup=skip_keyboard,
-    )
+    await update.message.reply_text("O‘zingiz haqingizda yozing:", reply_markup=skip_keyboard)
     return BIO
 
 
@@ -319,6 +409,18 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     profile = users_data[user_id]
 
+    await update.message.reply_photo(
+        photo=photo_id,
+        caption="Profil saqlandi ✅",
+        reply_markup=main_menu
+    )
+
+    username_line = (
+        f"📛 Username: @{profile.get('telegram_username')}\n"
+        if profile.get("telegram_username")
+        else ""
+    )
+
     caption_text = (
         "✅ Yangi profil\n\n"
         f"📱 Telefon: {profile.get('phone', 'yo‘q')}\n"
@@ -328,13 +430,8 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"🔎 Qidiryapti: {profile.get('looking_for', 'yo‘q')}\n"
         f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
         f"📝 Bio: {profile.get('bio', 'yo‘q')}\n"
+        f"{username_line}"
         f"🆔 ID: {profile.get('telegram_id', 'yo‘q')}"
-    )
-
-    await update.message.reply_photo(
-        photo=photo_id,
-        caption="Profil saqlandi ✅",
-        reply_markup=main_menu
     )
 
     try:
@@ -354,7 +451,6 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     except Exception as e:
         print(f"Kanalga yuborishda xatolik: {e}")
-        await update.message.reply_text(f"Kanalga yuborishda xatolik: {e}")
 
     return ConversationHandler.END
 
@@ -371,20 +467,9 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     profile = users_data[user_id]
 
-    text = (
-        "👤 Sizning profilingiz\n\n"
-        f"📱 Telefon: {profile.get('phone', 'yo‘q')}\n"
-        f"👤 Ism: {profile.get('name', 'yo‘q')}\n"
-        f"🎂 Yosh: {profile.get('age', 'yo‘q')}\n"
-        f"🚻 Jins: {profile.get('gender', 'yo‘q')}\n"
-        f"🔎 Qidiryapti: {profile.get('looking_for', 'yo‘q')}\n"
-        f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
-        f"📝 Bio: {profile.get('bio', 'yo‘q')}"
-    )
-
     await update.message.reply_photo(
         photo=profile["photo"],
-        caption=text,
+        caption=build_profile_caption(profile, "👤 Sizning profilingiz"),
         reply_markup=profile_menu
     )
 
@@ -415,12 +500,10 @@ def find_next_candidate(user_id: int):
     if not candidates:
         return None
 
-    # avval ko‘rilmaganlarni qidiramiz
     for candidate_id in candidates:
         if candidate_id not in viewed:
             return candidate_id
 
-    # hammasi ko‘rilgan bo‘lsa, qaytadan aylantiramiz
     viewed.clear()
     return candidates[0] if candidates else None
 
@@ -450,18 +533,9 @@ async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["current_profile_id"] = candidate_id
 
     profile = users_data[candidate_id]
-    text = (
-        "🌐 Profil\n\n"
-        f"👤 Ism: {profile.get('name', 'yo‘q')}\n"
-        f"🎂 Yosh: {profile.get('age', 'yo‘q')}\n"
-        f"🚻 Jins: {profile.get('gender', 'yo‘q')}\n"
-        f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
-        f"📝 Bio: {profile.get('bio', 'yo‘q')}"
-    )
-
     await update.message.reply_photo(
         photo=profile["photo"],
-        caption=text,
+        caption=build_profile_caption(profile, "🌐 Profil"),
         reply_markup=browse_menu
     )
 
@@ -484,6 +558,25 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     likes_data.setdefault(user_id, set()).add(target_id)
     viewed_data.setdefault(user_id, set()).add(target_id)
 
+    my_profile = users_data.get(user_id, {})
+    target_profile = users_data.get(target_id, {})
+
+    my_name = my_profile.get("name", "Foydalanuvchi")
+    target_name = target_profile.get("name", "Foydalanuvchi")
+
+    # Like haqida xabar target userga
+    try:
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=(
+                f"❤️ Sizni kimdir yoqtirdi!\n\n"
+                f"👤 Ism: {my_name}\n"
+                f"Botga kirib 🚀 Boshlash ni bosing."
+            ),
+        )
+    except Exception as e:
+        print(f"Like xabarini yuborishda xatolik: {e}")
+
     matched_now = False
 
     if user_id in likes_data.get(target_id, set()):
@@ -493,20 +586,23 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             matches_data.add(pair)
             matched_now = True
 
-            target_profile = users_data.get(target_id, {})
-            user_profile = users_data.get(user_id, {})
+            your_contact = get_contact_text(my_profile)
+            target_contact = get_contact_text(target_profile)
 
             await update.message.reply_text(
-                f"🎉 Match bo‘ldi!\n\n"
-                f"👤 {target_profile.get('name', 'Foydalanuvchi')} ham sizni like qildi."
+                "🎉 Match bo‘ldi!\n\n"
+                f"👤 {target_name} ham sizni yoqtirdi.\n"
+                f"Aloqa: {target_contact}",
+                reply_markup=main_menu
             )
 
             try:
                 await context.bot.send_message(
                     chat_id=target_id,
                     text=(
-                        f"🎉 Match bo‘ldi!\n\n"
-                        f"👤 {user_profile.get('name', 'Foydalanuvchi')} sizni like qildi."
+                        "🎉 Match bo‘ldi!\n\n"
+                        f"👤 {my_name} ham sizni yoqtirdi.\n"
+                        f"Aloqa: {your_contact}"
                     ),
                 )
             except Exception as e:
@@ -515,11 +611,7 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=CHANNEL_ID,
-                    text=(
-                        "💖 Yangi match!\n\n"
-                        f"{user_profile.get('name', 'User')} ❤️ "
-                        f"{target_profile.get('name', 'User')}"
-                    )
+                    text=f"💖 Yangi match!\n\n{my_name} ❤️ {target_name}"
                 )
             except Exception as e:
                 print(f"Matchni kanalga yuborishda xatolik: {e}")
@@ -584,7 +676,6 @@ def main():
     )
 
     app.add_handler(conv_handler)
-
     app.add_handler(MessageHandler(filters.Regex("^👤 Profil$"), show_profile))
     app.add_handler(MessageHandler(filters.Regex("^⬅️ Qaytish$"), back_to_main))
     app.add_handler(MessageHandler(filters.Regex("^🚀 Boshlash$"), browse_profiles))
