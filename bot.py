@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 
+from geopy.geocoders import Nominatim
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -23,6 +24,8 @@ PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 
 users_data = {}
 started_users = set()
+
+geolocator = Nominatim(user_agent="friend_match_uz_bot")
 
 main_menu = ReplyKeyboardMarkup(
     [["👤 Profil"]],
@@ -214,7 +217,27 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
 
-        users_data[user_id]["city"] = "Lokatsiya yuborildi"
+        try:
+            location = geolocator.reverse((lat, lon), language="en", exactly_one=True)
+
+            if location and "address" in location.raw:
+                address = location.raw["address"]
+                city = (
+                    address.get("city")
+                    or address.get("town")
+                    or address.get("village")
+                    or address.get("county")
+                    or address.get("state")
+                    or "Noma’lum"
+                )
+            else:
+                city = "Noma’lum"
+
+        except Exception as e:
+            print(f"Lokatsiyadan shahar aniqlashda xatolik: {e}")
+            city = "Noma’lum"
+
+        users_data[user_id]["city"] = city
         users_data[user_id]["location"] = (lat, lon)
 
     else:
