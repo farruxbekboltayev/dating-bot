@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -24,9 +25,7 @@ users_data = {}
 started_users = set()
 
 main_menu = ReplyKeyboardMarkup(
-    [
-        ["👤 Profil"],
-    ],
+    [["👤 Profil"]],
     resize_keyboard=True
 )
 
@@ -95,15 +94,11 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     contact = update.message.contact
 
     if not contact:
-        await update.message.reply_text(
-            "Telefon tugmasini bosib yuboring."
-        )
+        await update.message.reply_text("Telefon tugmasini bosib yuboring.")
         return PHONE
 
     if contact.user_id != update.effective_user.id:
-        await update.message.reply_text(
-            "O‘zingizning telefon raqamingizni yuboring."
-        )
+        await update.message.reply_text("O‘zingizning telefon raqamingizni yuboring.")
         return PHONE
 
     user_id = update.effective_user.id
@@ -111,6 +106,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     users_data[user_id] = {
         "telegram_id": user_id,
         "phone": contact.phone_number,
+        "location": None,
     }
 
     await update.message.reply_text(
@@ -129,7 +125,6 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return NAME
 
     users_data[user_id]["name"] = name
-
     await update.message.reply_text("Yoshingiz?")
     return AGE
 
@@ -139,7 +134,7 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     age_text = update.message.text.strip()
 
     if not age_text.isdigit():
-        await update.message.reply_text("Yoshni raqam bilan yozing")
+        await update.message.reply_text("Yoshni raqam bilan yozing.")
         return AGE
 
     age = int(age_text)
@@ -218,16 +213,26 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.message.location:
         lat = update.message.location.latitude
         lon = update.message.location.longitude
-        users_data[user_id]["city"] = f"Lokatsiya: {lat}, {lon}"
+
+        users_data[user_id]["city"] = "Lokatsiya yuborildi"
+        users_data[user_id]["location"] = (lat, lon)
+
     else:
         text = update.message.text.strip()
+
         if text == "✍️ Qo‘lda yozish":
             await update.message.reply_text(
                 "Shahar nomini yozing:",
                 reply_markup=ReplyKeyboardRemove(),
             )
             return CITY
+
+        if len(text) < 2:
+            await update.message.reply_text("Shahar nomini to‘g‘ri kiriting.")
+            return CITY
+
         users_data[user_id]["city"] = text
+        users_data[user_id]["location"] = None
 
     skip_keyboard = ReplyKeyboardMarkup(
         [["⏭ O‘tkazib yuborish"]],
@@ -270,7 +275,7 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     profile = users_data[user_id]
 
-    text = (
+    caption_text = (
         "✅ Yangi profil\n\n"
         f"📱 Telefon: {profile.get('phone', 'yo‘q')}\n"
         f"👤 Ism: {profile.get('name', 'yo‘q')}\n"
@@ -292,8 +297,17 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await context.bot.send_photo(
             chat_id=CHANNEL_ID,
             photo=photo_id,
-            caption=text
+            caption=caption_text
         )
+
+        if profile.get("location"):
+            lat, lon = profile["location"]
+            await context.bot.send_location(
+                chat_id=CHANNEL_ID,
+                latitude=lat,
+                longitude=lon
+            )
+
     except Exception as e:
         print(f"Kanalga yuborishda xatolik: {e}")
         await update.message.reply_text(f"Kanalga yuborishda xatolik: {e}")
@@ -346,7 +360,7 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Bekor qilindi",
+        "Bekor qilindi.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
