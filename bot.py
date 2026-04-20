@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 
 TOKEN = "8743012137:AAGM7asIH06aJX_OK-Dtoylw8BlJYt68RL0"
+CHANNEL_ID = -1003937370541
 
 # Bosqichlar
 PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
@@ -21,7 +22,6 @@ PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 # Oddiy vaqtinchalik saqlash
 # Keyin xohlasangiz SQLite ga o'tkazamiz
 users_data = {}
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     phone_keyboard = ReplyKeyboardMarkup(
@@ -31,8 +31,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
 
     await update.message.reply_text(
-        "Assalomu alaykum.\n\n"
-        "Ro‘yxatdan o‘tish uchun avval telefon raqamingizni yuboring:",
+        "Assalomu alaykum.\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni yuboring:",
         reply_markup=phone_keyboard,
     )
     return PHONE
@@ -55,7 +54,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     }
 
     await update.message.reply_text(
-        "Rahmat.\n\nEndi ismingizni yozing:",
+        "Ismingizni yozing:",
         reply_markup=ReplyKeyboardRemove(),
     )
     return NAME
@@ -66,11 +65,10 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     name = update.message.text.strip()
 
     if len(name) < 2:
-        await update.message.reply_text("Ism juda qisqa. Qayta yozing:")
+        await update.message.reply_text("Ismingizni to‘g‘ri kiriting:")
         return NAME
 
     users_data[user_id]["name"] = name
-
     await update.message.reply_text("Yoshingiz nechida?")
     return AGE
 
@@ -80,13 +78,13 @@ async def get_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     age_text = update.message.text.strip()
 
     if not age_text.isdigit():
-        await update.message.reply_text("Yoshni faqat raqam bilan yozing. Masalan: 22")
+        await update.message.reply_text("Yoshni raqam bilan kiriting. Masalan: 20")
         return AGE
 
     age = int(age_text)
 
     if age < 18 or age > 100:
-        await update.message.reply_text("Iltimos, 18 dan 100 gacha bo‘lgan yosh kiriting.")
+        await update.message.reply_text("18 dan 100 gacha yosh kiriting.")
         return AGE
 
     users_data[user_id]["age"] = age
@@ -149,15 +147,11 @@ async def get_city(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     city = update.message.text.strip()
 
     if len(city) < 2:
-        await update.message.reply_text("Shahar nomini to‘g‘ri kiriting:")
+        await update.message.reply_text("Shahar nomini to‘g‘ri kiriting.")
         return CITY
 
     users_data[user_id]["city"] = city
-
-    await update.message.reply_text(
-        "O‘zingiz haqingizda qisqacha yozing:\n"
-        "Masalan: sportni yaxshi ko‘raman, sayr qilish yoqadi."
-    )
+    await update.message.reply_text("O‘zingiz haqingizda qisqacha yozing:")
     return BIO
 
 
@@ -166,12 +160,11 @@ async def get_bio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     bio = update.message.text.strip()
 
     if len(bio) < 5:
-        await update.message.reply_text("Bio juda qisqa. Biroz to‘liqroq yozing:")
+        await update.message.reply_text("Bio biroz uzunroq bo‘lsin.")
         return BIO
 
     users_data[user_id]["bio"] = bio
-
-    await update.message.reply_text("Endi profil uchun rasm yuboring:")
+    await update.message.reply_text("Endi profilingiz uchun rasm yuboring:")
     return PHOTO
 
 
@@ -182,35 +175,34 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("Iltimos, rasm yuboring.")
         return PHOTO
 
-    # Eng kattaroq rasm file_id sini olamiz
     photo_file_id = update.message.photo[-1].file_id
     users_data[user_id]["photo"] = photo_file_id
 
     profile = users_data[user_id]
 
     summary_text = (
-        "✅ Profil tayyor!\n\n"
+        "✅ Yangi foydalanuvchi ro‘yxatdan o‘tdi\n\n"
         f"📱 Telefon: {profile['phone']}\n"
         f"👤 Ism: {profile['name']}\n"
         f"🎂 Yosh: {profile['age']}\n"
         f"🚻 Jins: {profile['gender']}\n"
         f"🔎 Qidiryapti: {profile['looking_for']}\n"
         f"🌍 Shahar: {profile['city']}\n"
-        f"📝 Bio: {profile['bio']}"
+        f"📝 Bio: {profile['bio']}\n"
+        f"🆔 Telegram ID: {profile['telegram_id']}"
     )
 
-    main_menu = ReplyKeyboardMarkup(
-        [
-            ["❤️ Odamlarni ko‘rish"],
-            ["✏️ Profilni tahrirlash"],
-        ],
-        resize_keyboard=True,
-    )
-
+    # Foydalanuvchiga yuboriladi
     await update.message.reply_photo(
         photo=photo_file_id,
-        caption=summary_text,
-        reply_markup=main_menu,
+        caption="✅ Profilingiz saqlandi. Tez orada ko‘rib chiqiladi."
+    )
+
+    # Kanalga yuboriladi
+    await context.bot.send_photo(
+        chat_id=CHANNEL_ID,
+        photo=photo_file_id,
+        caption=summary_text
     )
 
     return ConversationHandler.END
@@ -218,27 +210,10 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Ro‘yxatdan o‘tish bekor qilindi.",
+        "Bekor qilindi.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
-
-
-async def text_after_registration(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    text = update.message.text.strip()
-
-    if text == "❤️ Odamlarni ko‘rish":
-        await update.message.reply_text(
-            "Bu keyingi bosqich bo‘ladi. Hozircha profil yaratish qismi tayyor."
-        )
-    elif text == "✏️ Profilni tahrirlash":
-        await update.message.reply_text(
-            "Profilni qayta to‘ldirish uchun /start bosing."
-        )
-    else:
-        await update.message.reply_text("Davom etish uchun /start bosing.")
 
 
 def main() -> None:
@@ -260,7 +235,6 @@ def main() -> None:
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_after_registration))
 
     print("Bot ishga tushdi...")
     app.run_polling()
