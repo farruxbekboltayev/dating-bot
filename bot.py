@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-TOKEN = "TOKENINGIZNI_BU_YERGA"
+TOKEN = "8743012137:AAGM7asIH06aJX_OK-Dtoylw8BlJYt68RL0"
 
 # Bosqichlar
 PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
