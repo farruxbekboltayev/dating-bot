@@ -23,6 +23,9 @@ TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = -1003937370541
 
+started_users = set()
+pending_like_views = {}
+
 PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 
 geolocator = Nominatim(user_agent="friend_match_uz_bot")
