@@ -24,9 +24,10 @@ PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
 
 users_data = {}
 started_users = set()
-likes_data = {}       # {user_id: set(target_ids)}
-viewed_data = {}      # {user_id: set(viewed_ids)}
-matches_data = set()  # {(small_id, big_id)}
+likes_data = {}          # {user_id: set(target_ids)}
+viewed_data = {}         # {user_id: set(viewed_ids)}
+matches_data = set()     # {(small_id, big_id)}
+pending_like_views = {}  # {user_id: liked_by_user_id}
 
 geolocator = Nominatim(user_agent="friend_match_uz_bot")
 
@@ -57,9 +58,9 @@ state_map = {
     "Oregon": "OR",
     "Minnesota": "MN",
     "Wisconsin": "WI",
-    "Toshkent": "Toshkent",
+    "Tashkent": "Toshkent",
     "Xorazm Region": "Xorazm",
-    "Samarqand Region": "Samarqand",
+    "Samarkand Region": "Samarqand",
     "Bukhara Region": "Buxoro",
     "Andijan Region": "Andijon",
     "Namangan Region": "Namangan",
@@ -91,7 +92,7 @@ profile_menu = ReplyKeyboardMarkup(
 )
 
 browse_menu = ReplyKeyboardMarkup(
-    [["❤️ Like", "➡️ Keyingisi"], ["⬅️ Qaytish"]],
+    [["❤️ Like", "➡️ O‘tkazib yuborish"], ["⬅️ Qaytish"]],
     resize_keyboard=True
 )
 
@@ -142,6 +143,26 @@ def build_profile_caption(profile: dict, title: str = "👤 Profil") -> str:
         f"🔎 Qidiryapti: {profile.get('looking_for', 'yo‘q')}\n"
         f"🌆 Shahar: {profile.get('city', 'yo‘q')}\n"
         f"📝 Bio: {profile.get('bio', 'yo‘q')}"
+    )
+
+
+async def send_profile_to_user(
+    chat_id: int,
+    candidate_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    title: str = "🌐 Profil",
+):
+    profile = users_data.get(candidate_id)
+    if not profile or "photo" not in profile:
+        return
+
+    caption = build_profile_caption(profile, title)
+
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=profile["photo"],
+        caption=caption,
+        reply_markup=browse_menu
     )
 
 
@@ -532,11 +553,11 @@ async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["current_profile_id"] = candidate_id
 
-    profile = users_data[candidate_id]
-    await update.message.reply_photo(
-        photo=profile["photo"],
-        caption=build_profile_caption(profile, "🌐 Profil"),
-        reply_markup=browse_menu
+    await send_profile_to_user(
+        chat_id=user_id,
+        candidate_id=candidate_id,
+        context=context,
+        title="🌐 Profil"
     )
 
 
@@ -546,7 +567,10 @@ async def browse_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     target_id = context.user_data.get("current_profile_id")
+    if not target_id:
+        target_id = pending_like_views.get(user_id)
 
     if not target_id:
         await update.message.reply_text(
@@ -564,21 +588,33 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     my_name = my_profile.get("name", "Foydalanuvchi")
     target_name = target_profile.get("name", "Foydalanuvchi")
 
-    # Like haqida xabar target userga
-    try:
-        await context.bot.send_message(
-            chat_id=target_id,
-            text=(
-                f"❤️ Sizni kimdir yoqtirdi!\n\n"
-                f"👤 Ism: {my_name}\n"
-                f"Botga kirib 🚀 Boshlash ni bosing."
-            ),
-        )
-    except Exception as e:
-        print(f"Like xabarini yuborishda xatolik: {e}")
-
     matched_now = False
 
+    # Agar target sizni hali like qilmagan bo‘lsa, unga sizning profilingiz yuboriladi
+    if user_id not in likes_data.get(target_id, set()):
+        try:
+            pending_like_views[target_id] = user_id
+
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"❤️ Sizni kimdir yoqtirdi!\n\n"
+                    f"👤 {my_name} sizga like bosdi.\n"
+                    f"Quyida uning profilini ko‘rishingiz mumkin:"
+                ),
+            )
+
+            await send_profile_to_user(
+                chat_id=target_id,
+                candidate_id=user_id,
+                context=context,
+                title="❤️ Sizni yoqtirgan profil"
+            )
+
+        except Exception as e:
+            print(f"Like xabarini yuborishda xatolik: {e}")
+
+    # Agar target ham oldin like qilgan bo‘lsa -> MATCH
     if user_id in likes_data.get(target_id, set()):
         pair = get_match_pair(user_id, target_id)
 
@@ -616,6 +652,11 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print(f"Matchni kanalga yuborishda xatolik: {e}")
 
+            if pending_like_views.get(user_id) == target_id:
+                pending_like_views.pop(user_id, None)
+            if pending_like_views.get(target_id) == user_id:
+                pending_like_views.pop(target_id, None)
+
     if not matched_now:
         await update.message.reply_text("Like yuborildi ❤️")
 
@@ -625,7 +666,10 @@ async def like_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     target_id = context.user_data.get("current_profile_id")
+    if not target_id:
+        target_id = pending_like_views.get(user_id)
 
     if not target_id:
         await update.message.reply_text(
@@ -636,6 +680,9 @@ async def next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     viewed_data.setdefault(user_id, set()).add(target_id)
     context.user_data.pop("current_profile_id", None)
+
+    if pending_like_views.get(user_id) == target_id:
+        pending_like_views.pop(user_id, None)
 
     await show_next_profile(update, context)
 
@@ -680,7 +727,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^⬅️ Qaytish$"), back_to_main))
     app.add_handler(MessageHandler(filters.Regex("^🚀 Boshlash$"), browse_profiles))
     app.add_handler(MessageHandler(filters.Regex("^❤️ Like$"), like_profile))
-    app.add_handler(MessageHandler(filters.Regex("^➡️ Keyingisi$"), next_profile))
+    app.add_handler(MessageHandler(filters.Regex("^➡️ O‘tkazib yuborish$"), next_profile))
 
     print("Bot ishladi")
     app.run_polling()
