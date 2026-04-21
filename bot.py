@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Optional, Tuple, List
+from typing import Optional, List
 
 import psycopg
 from geopy.geocoders import Nominatim
@@ -23,10 +23,11 @@ TOKEN = os.getenv("TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_ID = -1003937370541
 
-started_users = set()
-pending_like_views = {}
-
 PHONE, NAME, AGE, GENDER, LOOKING_FOR, CITY, BIO, PHOTO = range(8)
+
+# vaqtinchalik session uchun
+started_users = set()
+pending_like_views = {}  # {user_id: liked_by_user_id}
 
 geolocator = Nominatim(user_agent="friend_match_uz_bot")
 
@@ -94,6 +95,10 @@ browse_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+
+# =========================
+# DATABASE
+# =========================
 
 def get_conn():
     return psycopg.connect(DATABASE_URL)
@@ -207,15 +212,6 @@ def get_user(user_id: int) -> Optional[dict]:
     }
 
 
-def is_profile_complete(user_id: int) -> bool:
-    profile = get_user(user_id)
-    if not profile:
-        return False
-
-    required = ["phone", "name", "age", "gender", "looking_for", "city", "bio", "photo"]
-    return all(profile.get(k) not in (None, "") for k in required)
-
-
 def save_like(from_user: int, to_user: int):
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -281,6 +277,19 @@ def get_all_candidate_ids() -> List[int]:
             return [row[0] for row in cur.fetchall()]
 
 
+# =========================
+# HELPERS
+# =========================
+
+def is_profile_complete(user_id: int) -> bool:
+    profile = get_user(user_id)
+    if not profile:
+        return False
+
+    required = ["phone", "name", "age", "gender", "looking_for", "city", "bio", "photo"]
+    return all(profile.get(k) not in (None, "") for k in required)
+
+
 def fits_preference(viewer_id: int, candidate_id: int) -> bool:
     viewer = get_user(viewer_id)
     candidate = get_user(candidate_id)
@@ -293,7 +302,6 @@ def fits_preference(viewer_id: int, candidate_id: int) -> bool:
 
     if viewer_pref == "🔄 Farqi yo‘q":
         return True
-
     return viewer_pref == candidate_gender
 
 
@@ -330,12 +338,10 @@ async def send_profile_to_user(
     if not profile or not profile.get("photo"):
         return
 
-    caption = build_profile_caption(profile, title)
-
     await context.bot.send_photo(
         chat_id=chat_id,
         photo=profile["photo"],
-        caption=caption,
+        caption=build_profile_caption(profile, title),
         reply_markup=browse_menu
     )
 
@@ -365,9 +371,7 @@ def build_short_location(lat: float, lon: float) -> str:
             state = state_map.get(state, state)
             country = country_map.get(country, country)
 
-            full_location = ", ".join(
-                part for part in [city, state, country] if part
-            )
+            full_location = ", ".join(part for part in [city, state, country] if part)
             return full_location or "Noma’lum"
 
         return "Noma’lum"
@@ -376,8 +380,45 @@ def build_short_location(lat: float, lon: float) -> str:
         return "Noma’lum"
 
 
+def find_next_candidate(user_id: int, viewed_ids: set):
+    candidates = []
+    for other_id in get_all_candidate_ids():
+        if other_id == user_id:
+            continue
+        if not fits_preference(user_id, other_id):
+            continue
+
+        other_profile = get_user(other_id)
+        your_profile = get_user(user_id)
+
+        other_pref = other_profile.get("looking_for")
+        your_gender = your_profile.get("gender")
+
+        if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
+            continue
+
+        candidates.append(other_id)
+
+    if not candidates:
+        return None
+
+    for candidate_id in candidates:
+        if candidate_id not in viewed_ids:
+            return candidate_id
+
+    viewed_ids.clear()
+    return candidates[0] if candidates else None
+
+
+# =========================
+# HANDLERS
+# =========================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
+
+    # Har safar boshidan boshlash
+    context.user_data.clear()
     started_users.add(user.id)
 
     username_text = f"@{user.username}" if user.username else "yo‘q"
@@ -407,13 +448,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
 
     await update.message.reply_text(
-        "Assalomu alaykum.\n\nRo‘yxatdan o‘tish uchun telefon raqamingizni yuboring:",
+        "Assalomu alaykum.\n\n"
+        "Ro‘yxatdan o‘tishni boshidan boshlaymiz.\n"
+        "Telefon raqamingizni yuboring:",
         reply_markup=phone_keyboard,
     )
     return PHONE
 
 
 async def edit_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+
     phone_keyboard = ReplyKeyboardMarkup(
         [[KeyboardButton("📱 Telefon raqam yuborish", request_contact=True)]],
         resize_keyboard=True,
@@ -438,10 +483,8 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text("O‘zingizning telefon raqamingizni yuboring.")
         return PHONE
 
-    user_id = update.effective_user.id
-
     context.user_data["profile"] = {
-        "telegram_id": user_id,
+        "telegram_id": update.effective_user.id,
         "telegram_username": update.effective_user.username,
         "phone": contact.phone_number,
         "lat": None,
@@ -673,35 +716,6 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update)
 
 
-def find_next_candidate(user_id: int, viewed_ids: set):
-    candidates = []
-    for other_id in get_all_candidate_ids():
-        if other_id == user_id:
-            continue
-        if not fits_preference(user_id, other_id):
-            continue
-
-        other_profile = get_user(other_id)
-        your_profile = get_user(user_id)
-
-        other_pref = other_profile.get("looking_for")
-        your_gender = your_profile.get("gender")
-        if other_pref != "🔄 Farqi yo‘q" and other_pref != your_gender:
-            continue
-
-        candidates.append(other_id)
-
-    if not candidates:
-        return None
-
-    for candidate_id in candidates:
-        if candidate_id not in viewed_ids:
-            return candidate_id
-
-    viewed_ids.clear()
-    return candidates[0] if candidates else None
-
-
 async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -714,7 +728,6 @@ async def show_next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     viewed_ids = set(context.user_data.get("viewed_ids", []))
     candidate_id = find_next_candidate(user_id, viewed_ids)
-
     context.user_data["viewed_ids"] = list(viewed_ids)
 
     if candidate_id is None:
@@ -863,11 +876,12 @@ async def next_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+
     await update.message.reply_text(
         "Bekor qilindi.",
         reply_markup=main_menu,
     )
-    context.user_data.pop("profile", None)
     return ConversationHandler.END
 
 
@@ -900,6 +914,7 @@ def main():
             PHOTO: [MessageHandler(filters.PHOTO, get_photo)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
 
     app.add_handler(conv_handler)
@@ -910,7 +925,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^➡️ O‘tkazib yuborish$"), next_profile))
 
     print("Bot ishladi")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
